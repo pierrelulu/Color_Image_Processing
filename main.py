@@ -131,6 +131,168 @@ def enregistrer_avec_tab(df: pd.DataFrame, filename: str) -> None:
     print(f"Fichier enregistré avec séparateur tab : {filename}")
 
 
+from itertools import combinations
+
+def calculer_distances_lab(df_lab: pd.DataFrame) -> pd.DataFrame:
+    df_lab['Patch'] = df_lab['Patch'].astype(str)
+    df_lab['Eclairage'] = df_lab['Eclairage'].astype(str)
+
+    distances = []
+    for ecl_name, group in df_lab.groupby('Eclairage'):
+        patch_coords = {
+            row.Patch: np.array([row.L, row.a, row.b])
+            for row in group.itertuples()
+        }
+        for (p1, v1), (p2, v2) in combinations(patch_coords.items(), 2):
+            dist = np.linalg.norm(v1 - v2)
+            distances.append({
+                "Eclairage": ecl_name,
+                "Patch1": p1,
+                "Patch2": p2,
+                "Distance": dist
+            })
+
+    return pd.DataFrame(distances)
+
+
+# -----------------------------------------------------------------------------
+# H) Recherche du couple de patchs optimal
+# -----------------------------------------------------------------------------
+def trouver_couple_optimal(df_distances: pd.DataFrame):
+    minima = df_distances.loc[df_distances.groupby("Eclairage")["Distance"].idxmin()]
+    maxima = df_distances.loc[df_distances.groupby("Eclairage")["Distance"].idxmax()]
+
+    min_set = {(row.Patch1, row.Patch2) for row in minima.itertuples()}
+    max_set = {(row.Patch1, row.Patch2) for row in maxima.itertuples()}
+    intersection = min_set & max_set
+    if intersection:
+        couple = list(intersection)[0]
+    else:
+        # Trouver le couple avec le plus grand écart (distance max - distance min)
+        candidats = []
+        for row_min in minima.itertuples():
+            for row_max in maxima.itertuples():
+                if {row_min.Patch1, row_min.Patch2} == {row_max.Patch1, row_max.Patch2}:
+                    ecart = row_max.Distance - row_min.Distance
+                    candidats.append((ecart, row_min.Patch1, row_min.Patch2))
+        if candidats:
+            candidats.sort(reverse=True)
+            couple = (candidats[0][1], candidats[0][2])
+        else:
+            couple = None
+
+    if couple:
+        ecl_min = minima[
+            ((minima["Patch1"] == couple[0]) & (minima["Patch2"] == couple[1])) |
+            ((minima["Patch1"] == couple[1]) & (minima["Patch2"] == couple[0]))
+        ]["Eclairage"].tolist()
+
+        ecl_max = maxima[
+            ((maxima["Patch1"] == couple[0]) & (maxima["Patch2"] == couple[1])) |
+            ((maxima["Patch1"] == couple[1]) & (maxima["Patch2"] == couple[0]))
+        ]["Eclairage"].tolist()
+
+        return couple, ecl_min, ecl_max
+    else:
+        return None, [], []
+
+
+def trouver_couple_optimal_par_ecart(df_distances: pd.DataFrame):
+    """
+    Pour chaque couple (Patch1, Patch2), on calcule la distance Lab sous
+    tous les éclairages. On cherche l'écart (distance max - distance min).
+    On retourne le couple qui a l'écart le plus grand, et les éclairages
+    où se produisent ce min et ce max.
+    """
+    # Pour éviter les problèmes d'ordre (Patch1, Patch2) vs (Patch2, Patch1),
+    # on peut normaliser dans une colonne "Pair" :
+    df_temp = df_distances.copy()
+    df_temp['Pair'] = df_temp.apply(
+        lambda row: tuple(sorted([row['Patch1'], row['Patch2']])), axis=1
+    )
+
+    # Groupement par couple
+    grouped = df_temp.groupby('Pair')
+
+    best_pair = None
+    best_ecart = -1
+    best_ecl_min = []
+    best_ecl_max = []
+
+    for pair, subdf in grouped:
+        # Distance min et max de ce couple, tous éclairages confondus
+        dist_min = subdf['Distance'].min()
+        dist_max = subdf['Distance'].max()
+        ecart = dist_max - dist_min
+
+        if ecart > best_ecart:
+            best_ecart = ecart
+            best_pair = pair
+            # Quels éclairages donnent cette distance min ?
+            best_ecl_min = subdf[subdf['Distance'] == dist_min]['Eclairage'].unique().tolist()
+            # Quels éclairages donnent cette distance max ?
+            best_ecl_max = subdf[subdf['Distance'] == dist_max]['Eclairage'].unique().tolist()
+
+    return best_pair, best_ecl_min, best_ecl_max
+
+
+def trouver_couple_optimal_avec_contrainte(df_distances: pd.DataFrame, seuil_proche_zero: float = 2.0):
+    """
+    Cherche le couple (Patch1, Patch2) dont la distance MIN (sous un certain éclairage)
+    est < seuil_proche_zero, et qui maximise l'écart (distance_max - distance_min).
+
+    Paramètres
+    ----------
+    df_distances : DataFrame contenant les colonnes [Eclairage, Patch1, Patch2, Distance]
+    seuil_proche_zero : float, distance en dessous de laquelle on considère les patchs "quasi identiques"
+
+    Retourne
+    --------
+    best_pair : tuple (PatchA, PatchB)
+    best_min_dist : float, distance minimale sur au moins un éclairage pour ce couple
+    best_max_dist : float, distance maximale sur un autre éclairage pour ce couple
+    best_ecl_min : list of str, éclairage(s) où la distance est min
+    best_ecl_max : list of str, éclairage(s) où la distance est max
+    """
+
+    # (Patch1, Patch2) peut apparaître dans l'ordre ou l'inverse dans df_distances,
+    # on unifie en créant une colonne "Pair" avec (PatchX, PatchY) dans l'ordre trié.
+    df_temp = df_distances.copy()
+    df_temp['Pair'] = df_temp.apply(
+        lambda row: tuple(sorted([row['Patch1'], row['Patch2']])), axis=1
+    )
+
+    # On regroupe par ce couple unifié
+    grouped = df_temp.groupby('Pair')
+
+    best_pair = None
+    best_ecart = -1  # on veut maximiser l'écart = (max_dist - min_dist)
+    best_min_dist = None
+    best_max_dist = None
+    best_ecl_min = []
+    best_ecl_max = []
+
+    for pair, subdf in grouped:
+        # subdf contient toutes les lignes (éclairages) pour ce couple
+        dist_min = subdf['Distance'].min()
+        dist_max = subdf['Distance'].max()
+
+        # On ne s'intéresse à ce couple que si sa distance min < seuil_proche_zero
+        if dist_min < seuil_proche_zero:
+            ecart = dist_max - dist_min
+            if ecart > best_ecart:
+                best_ecart = ecart
+                best_pair = pair
+                best_min_dist = dist_min
+                best_max_dist = dist_max
+
+                # Quels éclairages donnent la distance min ?
+                best_ecl_min = subdf[subdf['Distance'] == dist_min]['Eclairage'].unique().tolist()
+                # Quels éclairages donnent la distance max ?
+                best_ecl_max = subdf[subdf['Distance'] == dist_max]['Eclairage'].unique().tolist()
+
+    return best_pair, best_min_dist, best_max_dist, best_ecl_min, best_ecl_max
+
 # -----------------------------------------------------------------------------
 # F) Exemple d'utilisation (main)
 # -----------------------------------------------------------------------------
@@ -144,14 +306,31 @@ def main():
     df_lights = lire_data_lights(path_lights)
     df_cmf = lire_data_cmf(path_cmf)
 
-    # 2) Calcul XYZ de chaque éclairage (pour normaliser)
+    # 2) Calcul XYZ de chaque éclairage
     df_xyz_ill = calcul_xyz_eclairage(df_lights, df_cmf)
 
-    # 3) Calcul L*a*b* pour chaque (patch, éclairage)
+    # 3) Calcul Lab pour tous les (patch, éclairage)
     df_lab = calcul_lab_tous_patchs_eclairages(df_patchs, df_lights, df_cmf, df_xyz_ill)
 
-    # 4) Enregistrement au format "tab-separated" (.tsv ou .txt)
+    # 4) Enregistrement des Lab
     enregistrer_avec_tab(df_lab, "resultats_Lab.csv")
+
+    # 5) Calcul des distances entre patchs pour chaque éclairage
+    df_distances = calculer_distances_lab(df_lab)
+
+    # 6) Recherche du couple de patchs optimal en imposant la contrainte
+    seuil = 2.0  # ou 1.0 ou 0.5, selon votre tolérance
+    (couple, dist_min, dist_max, ecl_min, ecl_max
+    ) = trouver_couple_optimal_avec_contrainte(df_distances, seuil_proche_zero=seuil)
+
+    if couple is None:
+        print(f"Aucun couple de patchs n'a une distance min < {seuil}.")
+    else:
+        patchA, patchB = couple
+        print(f"\nCouple de patchs optimal : {couple}")
+        print(f"Distance MIN = {dist_min:.3f}, sous l'éclairage : {ecl_min}")
+        print(f"Distance MAX = {dist_max:.3f}, sous l'éclairage : {ecl_max}")
+        print(f"Écart = {dist_max - dist_min:.3f}")
 
 
 if __name__ == "__main__":
