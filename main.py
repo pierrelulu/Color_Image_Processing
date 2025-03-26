@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-
+import re
 
 # -----------------------------------------------------------------------------
 # A) Fonctions de lecture adaptées à VOS fichiers
@@ -21,7 +21,9 @@ def lire_data_cmf(path_cmf: str) -> pd.DataFrame:
     df.set_index("lambda", inplace=True)
     return df
 
-
+def lire_data_rgb(path_rgb: str) -> pd.DataFrame:
+    df = pd.read_excel(path_rgb)
+    return df
 # -----------------------------------------------------------------------------
 # B) Calcul de XYZ pour chaque éclairage
 # -----------------------------------------------------------------------------
@@ -58,7 +60,6 @@ def xyz_to_lab(xyz: np.array) -> np.array:
     b = 200 * (f(Y) - f(Z))
     return np.array([L, a, b])
 
-
 def calcul_xyz_patch_sous_eclairage(
         patch_name: str,
         df_patchs: pd.DataFrame,
@@ -88,6 +89,84 @@ def calcul_xyz_patch_sous_eclairage(
 
     return np.array([X_n, Y_n, Z_n])
 
+# -----------------------------------------------------------------------------
+# C bis) Fonctions XYZ --> sRGB et intégration patch × éclairage
+# -----------------------------------------------------------------------------
+def xyz_to_srgb(xyz: np.array) -> np.array:
+    """
+    Convertit les valeurs XYZ en valeurs RGB en utilisant la matrice de conversion standard sRGB.
+
+    Paramètres
+    ----------
+    xyz : np.array
+        Valeurs XYZ à convertir.
+
+    Retourne
+    --------
+    np.array
+        Valeurs RGB correspondantes.
+    """
+    # Matrice de conversion XYZ vers sRGB
+    matrice_conversion = np.array([
+        [3.2406, -1.5372, -0.4986],
+        [-0.9689, 1.8758, 0.0415],
+        [0.0557, -0.2040, 1.0570]
+    ])
+
+    # Appliquer la conversion
+    rgb = np.dot(matrice_conversion, xyz)
+
+    # Appliquer une correction gamma pour sRGB
+    rgb = np.where(
+        rgb <= 0.0031308,
+        12.92 * rgb,
+        1.055 * np.power(rgb, 1/2.4) - 0.055
+    )
+    # Normaliser les valeurs RGB pour qu'elles soient dans la plage [0, 255]
+    rgb = np.clip(rgb * 255, 0, 255)
+    return rgb
+
+def calcul_rgb_patch_sous_eclairage(
+        patch_name: str,
+        df_patchs: pd.DataFrame,
+        eclairage_name: str,
+        df_lights: pd.DataFrame,
+        df_cmf: pd.DataFrame,
+        df_xyz_ill: np.array
+) -> np.array:
+    """
+    Calcule les valeurs RGB d'un patch sous un éclairage donné.
+
+    Paramètres
+    ----------
+    patch_name : str
+        Nom du patch.
+    df_patchs : pd.DataFrame
+        DataFrame contenant les données spectrales des patchs.
+    eclairage_name : str
+        Nom de l'éclairage.
+    df_lights : pd.DataFrame
+        DataFrame contenant les données des éclairages.
+    df_cmf : pd.DataFrame
+        DataFrame contenant les fonctions colorimétriques.
+    xyz_ill : np.array
+        Valeurs XYZ de l'illuminant.
+
+    Retourne
+    --------
+    np.array
+        Valeurs RGB du patch sous l'éclairage donné.
+    """
+    # Calculer les valeurs XYZ du patch sous l'éclairage
+    xyz_ill = df_xyz_ill.loc[eclairage_name].values
+    xyz_patch = calcul_xyz_patch_sous_eclairage(
+        patch_name, df_patchs, eclairage_name, df_lights, df_cmf, xyz_ill
+    )
+
+    # Convertir les valeurs XYZ en RGB
+    rgb_patch = xyz_to_srgb(xyz_patch)
+
+    return rgb_patch
 
 # -----------------------------------------------------------------------------
 # D) Calcul du Lab pour tous les (patch, éclairage)
@@ -293,6 +372,90 @@ def trouver_couple_optimal_avec_contrainte(df_distances: pd.DataFrame, seuil_pro
 
     return best_pair, best_min_dist, best_max_dist, best_ecl_min, best_ecl_max
 
+def trouver_couple_optimal_par_prox(df_distances: pd.DataFrame, seuil_loin_zero: float = 5.0):
+    """
+    Cherche le couple (Patch1, Patch2) dont la distance MIN (sous un certain éclairage)
+    est minimale, et dont la distance_max est supérieure à seuil_loin_zero.
+
+    Paramètres
+    ----------
+    df_distances : DataFrame contenant les colonnes [Eclairage, Patch1, Patch2, Distance]
+    seuil_proche_zero : float, distance en dessous de laquelle on considère les patchs "quasi identiques"
+
+    Retourne
+    --------
+    best_pair : tuple (PatchA, PatchB)
+    best_min_dist : float, distance minimale sur au moins un éclairage pour ce couple
+    best_max_dist : float, distance maximale sur un autre éclairage pour ce couple
+    best_ecl_min : list of str, éclairage(s) où la distance est min
+    best_ecl_max : list of str, éclairage(s) où la distance est max
+    """
+
+    # (Patch1, Patch2) peut apparaître dans l'ordre ou l'inverse dans df_distances,
+    # on unifie en créant une colonne "Pair" avec (PatchX, PatchY) dans l'ordre trié.
+    df_temp = df_distances.copy()
+    df_temp['Pair'] = df_temp.apply(
+        lambda row: tuple(sorted([row['Patch1'], row['Patch2']])), axis=1
+    )
+
+    # On regroupe par ce couple unifié
+    grouped = df_temp.groupby('Pair')
+
+    best_pair = None
+    best_min_dist = 1e6 # on veut minimiser dE pour les couple suffisemment differents
+    best_max_dist = None
+    best_ecl_min = []
+    best_ecl_max = []
+
+    for pair, subdf in grouped:
+        # subdf contient toutes les lignes (éclairages) pour ce couple
+        dist_min = subdf['Distance'].min()
+        dist_max = subdf['Distance'].max()
+
+        # On ne s'intéresse à ce couple que si sa distance max > seuil_loin_zero
+        if dist_max > seuil_loin_zero:
+            if dist_min < best_min_dist:
+                best_pair = pair
+                best_min_dist = dist_min
+                best_max_dist = dist_max
+
+                # Quels éclairages donnent la distance min ?
+                best_ecl_min = subdf[subdf['Distance'] == dist_min]['Eclairage'].unique().tolist()
+                # Quels éclairages donnent la distance max ?
+                best_ecl_max = subdf[subdf['Distance'] == dist_max]['Eclairage'].unique().tolist()
+
+    return best_pair, best_min_dist, best_max_dist, best_ecl_min, best_ecl_max
+
+def convsersion_patch_rgb(nom_patch: str, df_rgb: pd.DataFrame):
+    """
+    Obtient les valeurs RGB d'un patch à partir de son nom.
+
+    Paramètres
+    ----------
+    nom_patch : str
+        Nom du patch sous la forme "Patch XXX".
+    df_rgb : pd.DataFrame
+        DataFrame contenant les valeurs RGB des patchs, indexé par le numéro de patch.
+
+    Retourne
+    --------
+    np.array
+        Valeurs RGB correspondantes.
+    """
+    # Extraire le numéro du patch à partir du nom
+    match = re.match(r"Patch (\d+)", nom_patch)
+    if not match:
+        raise ValueError(f"Le nom du patch '{nom_patch}' n'est pas au bon format.")
+
+    # Obtenir le numéro du patch
+    numero_patch = int(match.group(1))
+
+    # Accéder aux valeurs RGB dans le DataFrame
+    if numero_patch in df_rgb.index:
+        return 255*df_rgb.loc[numero_patch].values
+    else:
+        raise KeyError(f"Le patch {numero_patch} n'existe pas dans df_rgb.")
+
 # -----------------------------------------------------------------------------
 # F) Exemple d'utilisation (main)
 # -----------------------------------------------------------------------------
@@ -301,10 +464,12 @@ def main():
     path_patchs = "../Donnees/spectres_patchs.xlsx"
     path_lights = "../Donnees/Lights_Telelumen.xlsx"
     path_cmf = "../Donnees/CMF_xyz_2deg.xlsx"
+    path_rgb = "../Donnees/RGB.xlsx"
 
     df_patchs = lire_data_patchs(path_patchs)
     df_lights = lire_data_lights(path_lights)
     df_cmf = lire_data_cmf(path_cmf)
+    df_rgb = lire_data_rgb(path_rgb)
 
     # 2) Calcul XYZ de chaque éclairage
     df_xyz_ill = calcul_xyz_eclairage(df_lights, df_cmf)
@@ -319,19 +484,38 @@ def main():
     df_distances = calculer_distances_lab(df_lab)
 
     # 6) Recherche du couple de patchs optimal en imposant la contrainte
-    seuil = 2.0  # ou 1.0 ou 0.5, selon votre tolérance
-    (couple, dist_min, dist_max, ecl_min, ecl_max
-    ) = trouver_couple_optimal_avec_contrainte(df_distances, seuil_proche_zero=seuil)
+    seuil = 100# ou 1.0 ou 0.5, selon votre tolérance
+    (couple, dist_min, dist_max, list_ecl_min, list_ecl_max
+    ) = trouver_couple_optimal_par_prox(df_distances, seuil)
 
     if couple is None:
         print(f"Aucun couple de patchs n'a une distance min < {seuil}.")
-    else:
-        patchA, patchB = couple
-        print(f"\nCouple de patchs optimal : {couple}")
-        print(f"Distance MIN = {dist_min:.3f}, sous l'éclairage : {ecl_min}")
-        print(f"Distance MAX = {dist_max:.3f}, sous l'éclairage : {ecl_max}")
-        print(f"Écart = {dist_max - dist_min:.3f}")
+        return
 
+    ecl_max = list_ecl_max[0]
+    ecl_min = list_ecl_min[0]
+    patchA, patchB = couple
+    print(f"\nCouple de patchs optimal : {couple}")
+    print(f"Distance MIN = {dist_min:.3f}, sous l'éclairage : {ecl_min}")
+    print(f"Distance MAX = {dist_max:.3f}, sous l'éclairage : {ecl_max}")
+    print(f"Écart = {dist_max - dist_min:.3f}")
+    print(f"{patchA} : {convsersion_patch_rgb(patchA, df_rgb)} ; {patchA} : {convsersion_patch_rgb(patchB, df_rgb)}")
+
+    #Calcul des valeurs sRGB pour les patchs sous les 2 illuminants
+    A_mindiff = calcul_rgb_patch_sous_eclairage(
+        patchA, df_patchs, ecl_min, df_lights, df_cmf, df_xyz_ill
+    )
+    B_mindiff = calcul_rgb_patch_sous_eclairage(
+        patchB, df_patchs, ecl_min, df_lights, df_cmf, df_xyz_ill
+    )
+    A_maxdiff = calcul_rgb_patch_sous_eclairage(
+        patchA, df_patchs, ecl_max, df_lights, df_cmf, df_xyz_ill
+    )
+    B_maxdiff = calcul_rgb_patch_sous_eclairage(
+        patchB, df_patchs, ecl_max, df_lights, df_cmf, df_xyz_ill
+    )
+    print("sRGB des patchs sous les éclairages min et max :")
+    print(f"{ecl_min}: {A_mindiff} // {B_mindiff}\n{ecl_max}: {A_maxdiff} // {B_maxdiff}")
 
 if __name__ == "__main__":
     main()
