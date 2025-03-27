@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+from PIL import Image
 import re
 
 # -----------------------------------------------------------------------------
@@ -426,6 +427,10 @@ def trouver_couple_optimal_par_prox(df_distances: pd.DataFrame, seuil_loin_zero:
 
     return best_pair, best_min_dist, best_max_dist, best_ecl_min, best_ecl_max
 
+# -----------------------------------------------------------------------------
+# I) Extraction des valeurs RGB
+# -----------------------------------------------------------------------------
+
 def convsersion_patch_rgb(nom_patch: str, df_rgb: pd.DataFrame):
     """
     Obtient les valeurs RGB d'un patch à partir de son nom.
@@ -455,6 +460,48 @@ def convsersion_patch_rgb(nom_patch: str, df_rgb: pd.DataFrame):
         return 255*df_rgb.loc[numero_patch].values
     else:
         raise KeyError(f"Le patch {numero_patch} n'existe pas dans df_rgb.")
+
+# -----------------------------------------------------------------------------
+# J) Création d'Images
+# -----------------------------------------------------------------------------
+
+def remplacer_couleurs_image(rgb1: tuple, rgb2: tuple, fichier_image: str, fichier_sortie: str, seuil: int = 128):
+    """
+    Remplace les pixels noirs et blancs d'une image par des couleurs RGB spécifiées.
+
+    Paramètres
+    ----------
+    rgb1 : tuple
+        Couleur RGB pour remplacer les pixels noirs (format (R, G, B)).
+    rgb2 : tuple
+        Couleur RGB pour remplacer les pixels blancs (format (R, G, B)).
+    fichier_image : str
+        Chemin vers le fichier image PNG d'entrée.
+    fichier_sortie : str
+        Chemin pour enregistrer l'image modifiée.
+    seuil : int, optionnel
+        Valeur de seuil pour la binarisation de l'image (par défaut 128).
+    """
+    # Ouvrir l'image
+    image = Image.open(fichier_image).convert("L")  # Convertir en niveaux de gris
+    image_array = np.array(image)
+
+    # Appliquer le seuillage
+    image_bin = np.where(image_array < seuil, 0, 255).astype(np.uint8)
+
+    # Créer une image RGB à partir de l'image binaire
+    image_rgb = np.zeros((image_bin.shape[0], image_bin.shape[1], 3), dtype=np.uint8)
+
+    # Remplacer les pixels noirs et blancs par les couleurs spécifiées
+    image_rgb[image_bin == 0] = rgb1
+    image_rgb[image_bin == 255] = rgb2
+
+    # Convertir le tableau numpy en image PIL
+    image_modifiee = Image.fromarray(image_rgb, 'RGB')
+
+    # Enregistrer l'image modifiée
+    image_modifiee.save(fichier_sortie)
+    print(f"Image modifiée enregistrée sous : {fichier_sortie}")
 
 # -----------------------------------------------------------------------------
 # F) Exemple d'utilisation (main)
