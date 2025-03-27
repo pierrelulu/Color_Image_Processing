@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 from PIL import Image
 import re
+import cv2
+import matplotlib.pyplot as plt
 
 # -----------------------------------------------------------------------------
 # A) Fonctions de lecture adaptées à VOS fichiers
@@ -465,7 +467,7 @@ def convsersion_patch_rgb(nom_patch: str, df_rgb: pd.DataFrame):
 # J) Création d'Images
 # -----------------------------------------------------------------------------
 
-def remplacer_couleurs_image(rgb1: tuple, rgb2: tuple, fichier_image: str, fichier_sortie: str, seuil: int = 128):
+def remplacer_couleurs_seuillage(rgb1: tuple, rgb2: tuple, fichier_image: str, fichier_sortie: str, seuil: int = 128):
     """
     Remplace les pixels noirs et blancs d'une image par des couleurs RGB spécifiées.
 
@@ -502,6 +504,46 @@ def remplacer_couleurs_image(rgb1: tuple, rgb2: tuple, fichier_image: str, fichi
     # Enregistrer l'image modifiée
     image_modifiee.save(fichier_sortie)
     print(f"Image modifiée enregistrée sous : {fichier_sortie}")
+
+def remplacer_couleurs_contours(rgb1: tuple, rgb2: tuple, fichier_image: str, fichier_sortie: str):
+        """
+        Remplace le fond d'une image par une couleur RGB et les contours par une autre couleur RGB.
+
+        Paramètres
+        ----------
+        couple_rgb1 : tuple
+            Couleur RGB pour remplir le fond (format (R, G, B)).
+        couple_rgb2 : tuple
+            Couleur RGB pour dessiner les contours (format (R, G, B)).
+        fichier_image : str
+            Chemin vers le fichier image PNG d'entrée.
+        fichier_sortie : str
+            Chemin pour enregistrer l'image modifiée.
+        """
+        # Lire l'image
+        inverted_rgb1 = tuple(rgb1[::-1])
+        inverted_rgb2 = tuple(rgb2[::-1])
+        image = cv2.imread(fichier_image)
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (17, 17), 0)
+        thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                       cv2.THRESH_BINARY_INV, 11, 2)
+
+        # Détecter les contours()
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Créer une image blanche pour le fond
+        fond = np.zeros_like(image)
+        fond[:, :] = inverted_rgb1
+
+        plt.show()
+
+        # Dessiner les contours sur l'image de fond
+        cv2.drawContours(fond, contours, -1, inverted_rgb2, thickness=cv2.FILLED)
+
+        # Enregistrer l'image modifiée
+        cv2.imwrite(fichier_sortie, fond)
+        print(f"Image modifiée enregistrée sous : {fichier_sortie}")
 
 # -----------------------------------------------------------------------------
 # F) Exemple d'utilisation (main)
@@ -542,11 +584,13 @@ def main():
     ecl_max = list_ecl_max[0]
     ecl_min = list_ecl_min[0]
     patchA, patchB = couple
+    patch1_rgb = convsersion_patch_rgb(patchA, df_rgb)
+    patch2_rgb = convsersion_patch_rgb(patchB, df_rgb)
     print(f"\nCouple de patchs optimal : {couple}")
     print(f"Distance MIN = {dist_min:.3f}, sous l'éclairage : {ecl_min}")
     print(f"Distance MAX = {dist_max:.3f}, sous l'éclairage : {ecl_max}")
     print(f"Écart = {dist_max - dist_min:.3f}")
-    print(f"{patchA} : {convsersion_patch_rgb(patchA, df_rgb)} ; {patchA} : {convsersion_patch_rgb(patchB, df_rgb)}")
+    print(f"{patchA} : {patch1_rgb} ; {patchB} : {patch2_rgb}")
 
     #Calcul des valeurs sRGB pour les patchs sous les 2 illuminants
     A_mindiff = calcul_rgb_patch_sous_eclairage(
@@ -563,6 +607,10 @@ def main():
     )
     print("sRGB des patchs sous les éclairages min et max :")
     print(f"{ecl_min}: {A_mindiff} // {B_mindiff}\n{ecl_max}: {A_maxdiff} // {B_maxdiff}")
+
+    remplacer_couleurs_contours(A_maxdiff, B_maxdiff, "../Donnees/image_test.png", "../Donnees/image_maxDiff.png")
+    remplacer_couleurs_contours(A_mindiff, B_mindiff, "../Donnees/image_test.png", "../Donnees/image_minDiff.png")
+    remplacer_couleurs_contours(patch1_rgb, patch2_rgb, "../Donnees/image_test.png", "../Donnees/image_reelle.png")
 
 if __name__ == "__main__":
     main()
